@@ -83,6 +83,27 @@ docker compose down
 ```
 
 ---
+## Running on native Linux (recommended for the switch-level mitigation)
+On **Windows/WSL + Docker Desktop** the bridge lives inside Desktop's VM and its
+kernel has **no bridge-netfilter**, so `ebtables`/nftables-bridge rules can't load
+(`"kernel doesn't support the ebtables 'filter' table"`). We fell back to static
+ARP + nftables (host) + port isolation there.
+
+On a **native Linux host** the kernel supports it, so `mitigation/bridge_rules.sh`
+runs for real and drops forged ARP + rogue DHCP **at the bridge**:
+```bash
+git clone https://github.com/TheCodeVirtuoso/ps4_secure_hackthon.git
+cd ps4_secure_hackthon
+docker compose up -d --build
+sudo ./mitigation/bridge_rules.sh apply      # switch-level DAI + DHCP snooping
+sudo ./mitigation/bridge_rules.sh status
+```
+To validate and capture evidence, follow **`evidence/native-linux-runbook.md`** —
+it turns the report's "pending validation" rows into **Validated**. The dashboards
+and the detector also benefit: the lab bridge is visible in the host namespace, so
+host-side `tcpdump -i <bridge>` works directly.
+
+---
 ### If host ebtables isn't available in your WSL kernel
 Check with `sudo ebtables -L`. If it errors, load the module
 (`sudo modprobe ebtables ebtable_filter br_netfilter`). If your WSL kernel
