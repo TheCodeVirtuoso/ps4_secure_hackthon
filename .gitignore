@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+
+# runtime scratch (keep the folder, not transient dumps)
+*.tmp

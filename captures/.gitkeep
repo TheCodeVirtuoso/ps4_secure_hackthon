@@ -1,0 +1,3 @@
+# pcaps land here. Suggested names:
+#   before_arp.pcap   after_arp.pcap
+#   before_dhcp.pcap  after_dhcp.pcap

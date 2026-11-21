@@ -1,0 +1,131 @@
+# ============================================================================
+#  PS4 "Trust Issues" — switched LAN lab
+# ============================================================================
+#  One custom Docker bridge network == our office switch.
+#  All five boxes sit on the same L2 segment (172.30.0.0/24), exactly like
+#  colleagues plugged into the same office switch.
+#
+#  Roles & fixed IPs (hardcoded everywhere so scripts/writeup stay simple):
+#     172.30.0.1   <- the Docker bridge itself (host side). We IGNORE this.
+#     gateway      172.30.0.2    the "office router" + plain-HTTP test page
+#     dhcp-server  172.30.0.3    the LEGIT dnsmasq handing out leases
+#     victim       172.30.0.10   the colleague whose traffic gets intercepted
+#     attacker     172.30.0.66   the malicious insider
+#     detector     172.30.0.50   our monitoring box (runs detector.py)
+#
+#  Capabilities:
+#     NET_RAW   -> craft/sniff raw packets (Scapy ARP spoof + detector)
+#     NET_ADMIN -> edit ARP cache, add ebtables/nft rules, run dhclient
+#  Only the boxes that need them get them (port-security story: the attacker
+#  shouldn't really have these — that's the whole point of the scenario).
+# ============================================================================
+
+services:
+
+  # --- The "office router" + the plain HTTP server the victim talks to -------
+  gateway:
+    build: .
+    image: trust-lab:latest          # built once, reused by every service below
+    container_name: trust-gateway
+    hostname: gateway
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      lan:
+        ipv4_address: 172.30.0.2
+    # Serve a plain-HTTP page on :80 so intercepted traffic is human-readable.
+    # /lab/www is created inline so you don't need an extra file on disk.
+    command: >
+      sh -c "mkdir -p /lab/www &&
+             printf '<h1>Internal Payroll Portal</h1><p>SECRET: wire $$50k to acct 4471</p>' > /lab/www/index.html &&
+             cd /lab/www && python3 -m http.server 80"
+
+  # --- The legitimate DHCP server --------------------------------------------
+  dhcp-server:
+    image: trust-lab:latest
+    container_name: trust-dhcp
+    hostname: dhcp-server
+    depends_on: [gateway]
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      lan:
+        ipv4_address: 172.30.0.3
+    # Legit dnsmasq: hands out .100-.150, tells clients the REAL gateway (.2)
+    # and a sane DNS server. --no-daemon keeps it foreground for logs.
+    # NOTE: this MUST be a single line. A YAML folded block (>) with
+    # deeper-indented continuation lines keeps the newlines, which split the
+    # dnsmasq args across separate shell commands and silently drops the
+    # --dhcp-range (server comes up DNS-only). Keep all flags on one line.
+    command: dnsmasq --no-daemon --log-dhcp --interface=eth0 --bind-interfaces --dhcp-authoritative --dhcp-range=172.30.0.100,172.30.0.150,12h --dhcp-option=3,172.30.0.2 --dhcp-option=6,172.30.0.2
+
+  # --- The victim colleague ---------------------------------------------------
+  victim:
+    image: trust-lab:latest
+    container_name: trust-victim
+    hostname: victim
+    depends_on: [gateway]
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      lan:
+        ipv4_address: 172.30.0.10
+    # Victim behaves like a chatty office user. Every 3s it (a) loads the payroll
+    # page carrying a session cookie + bearer token, and (b) submits a login form
+    # with a username/password. All plaintext HTTP — so a MITM attacker captures
+    # the cookie, the token AND the credentials, not just the page secret.
+    # (The test server 501s the POST; the request + body still cross the wire and
+    #  are visible to anyone in the middle — which is exactly the point.)
+    command: >
+      sh -c "echo 'victim up at 172.30.0.10';
+             while true; do
+               curl -s --max-time 2 -H 'Cookie: session=SESS-9f83ac-DO-NOT-STEAL' -H 'Authorization: Bearer tok_live_8841kQ' http://172.30.0.2/ >/dev/null;
+               curl -s --max-time 2 -X POST -d 'user=jdoe&password=Hunter2!&account=4471&amount=50000' http://172.30.0.2/login >/dev/null;
+               curl -s --max-time 2 http://payroll.corp/ >/dev/null;
+               sleep 3;
+             done"
+
+  # --- The malicious insider --------------------------------------------------
+  attacker:
+    image: trust-lab:latest
+    container_name: trust-attacker
+    hostname: attacker
+    depends_on: [gateway, victim]
+    cap_add: [NET_ADMIN, NET_RAW]
+    # IP forwarding ON so the attacker can relay victim<->gateway traffic
+    # (a real MITM forwards packets so the victim doesn't lose connectivity).
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks:
+      lan:
+        ipv4_address: 172.30.0.66
+    volumes:
+      - ./attack:/lab/attack          # arp_spoof.py + rogue_dhcp/dnsmasq.conf
+      - ./captures:/lab/captures       # drop pcaps here, shows up on host
+    command: ["sleep", "infinity"]     # idle; you launch attacks by hand
+
+  # --- The defender's monitoring box -----------------------------------------
+  detector:
+    image: trust-lab:latest
+    container_name: trust-detector
+    hostname: detector
+    depends_on: [gateway, victim]
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      lan:
+        ipv4_address: 172.30.0.50
+    volumes:
+      - ./detector:/lab/detector
+      - ./mitigation:/lab/mitigation
+      - ./captures:/lab/captures
+    command: ["sleep", "infinity"]     # idle; you launch detector.py by hand
+
+networks:
+  lan:
+    name: trust-lan
+    driver: bridge
+    driver_opts:
+      # Give the bridge a predictable name so host-side tcpdump is easy:
+      #   tcpdump -i br-trust -n arp
+      com.docker.network.bridge.name: br-trust
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
