@@ -49,6 +49,14 @@ as a **forging DNS server** (`address=/payroll.corp/172.30.0.66`).
 
 **Proof (real):** `DHCPOFFER/ACK ... from 172.30.0.66`; victim lease server-id = `.66`.
 
+**Honesty — it's a race.** DHCP is first-offer-wins, so the rogue and the legit
+server (`.3`) race; the rogue does not always win on timing alone. For a
+deterministic demo we briefly `docker compose stop dhcp-server` so the rogue
+reliably wins; in production the mitigation (DHCP snooping) drops the rogue's
+frames regardless of timing. The victim's normal traffic is also on-subnet with
+no DNS, so the DHCP attack primarily proves the **hijack** (changed
+lease/resolver) — the DNS-redirect path is what makes interception visible.
+
 **What the attacker sees/does (beyond ARP):**
 - **Every DNS query** the victim makes (a map of what they do).
 - **Forges answers** → `payroll.corp` resolves to the attacker, redirecting the
